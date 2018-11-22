@@ -5,5 +5,8 @@
 # 
 ANCHOR_SCALES = [8, 16, 32]
 
+#
+ANCHOR_RATIOS = [0.5, 1.0, 2.0]
+
 # 
 RESIZED_IMAGE_SIZE = [1000, 600]
