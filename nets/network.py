@@ -1,6 +1,6 @@
 import os
 import tensorflow as tf
-import net_config
+from net_config import *
 from nets.anchors_utils import generate_anchors
 from nets.target_layer import anchor_target_layer, proposal_target_layer
 
@@ -11,7 +11,7 @@ class Network(object):
         self._anchor_targets = {}
         self._proposal_targets = {}
         self._losses = {}
-        self._num_anchors = len(net_config.ANCHOR_SCALES) * len(net_config.ANCHOR_RATIOS)
+        self._num_anchors = len(ANCHOR_SCALES) * len(ANCHOR_RATIOS)
         self._num_classes = num_classes
         self.build(True)
 
@@ -20,19 +20,19 @@ class Network(object):
             image_string = tf.read_file(image_name)
             image_decoded = tf.image.decode_jpeg(image_string)  # TODO:数据格式
             # TODO:提取图片尺寸,not here！！
-            image_resized = tf.image.resize_images(image_decoded, net_config.RESIZED_IMAGE_SIZE)
+            image_resized = tf.image.resize_images(image_decoded, RESIZED_IMAGE_SIZE)
             # FIXME:从gt_boxes_names到gt_boxes，从image_info_names到image_info
             return image_resized, gt_boxes, image_info
 
-        img_names = os.listdir('./train')  # TODO:将路径提取出来
+        img_names = os.listdir(TRAIN_IMG_DATA_PATH)
         image_name_list = []
         gt_boxes_list = []
         image_info_list = []
 
         for img_name in img_names:
-            image_name_list.append('./train/' + img_name)
-            gt_boxes_list.append()
-            image_info_list.append()
+            image_name_list.append(os.path.join(TRAIN_IMG_DATA_PATH, img_name))
+            gt_boxes_list.append()  # TODO:
+            image_info_list.append()  # TODO:
 
         image_name_list = tf.constant(image_name_list)
         gt_boxes_list = tf.constant(gt_boxes_list)
@@ -40,7 +40,7 @@ class Network(object):
 
         dataset = tf.data.Dataset.from_tensor_slices((image_name_list, gt_boxes_list, image_info_list))
         dataset = dataset.map(_parse_function)
-        dataset = dataset.shuffle(buffer_size=50000)  # TODO:提取buffer_size大小
+        dataset = dataset.shuffle(buffer_size=500)  # TODO:buffer_size大小
         dataset = dataset.repeat()
         dataset = dataset.batch(1)
 
@@ -55,9 +55,7 @@ class Network(object):
         # TODO:这个16是原图到feature map缩小的倍数,提出来？
         height_of_feature_map = tf.to_int32(tf.ceil(image_info[0] / tf.to_float(16)))
         width_of_feature_map = tf.to_int32(tf.ceil(image_info[1] / tf.to_float(16)))
-        anchors, num_of_anchors = generate_anchors(height_of_feature_map, width_of_feature_map, 16,
-                                                   net_config.ANCHOR_SCALES,
-                                                   net_config.ANCHOR_RATIOS)
+        anchors, num_of_anchors = generate_anchors(height_of_feature_map, width_of_feature_map, 16, ANCHOR_SCALES, ANCHOR_RATIOS)
         return anchors, num_of_anchors
 
     def _proposal_target_layer(self, rois, roi_scores, name):
@@ -164,16 +162,13 @@ class Network(object):
             b3 = tf.maximum(tf.minimum(boxes[:, 3], im_info[0] - 1), 0)
             return tf.stack([b0, b1, b2, b3], axis=1)
 
-        rpn = tf.layers.conv2d(inputs=feature_map, filters=512, kernel_size=[3, 3], padding='SAME',
-                               trainable=is_training)
-        rpn_class_score = tf.layers.conv2d(rpn, self._num_anchors * 2, [1, 1], trainable=is_training)  # H*W*18
+        rpn = tf.layers.conv2d(inputs=feature_map, filters=512, kernel_size=[3, 3], padding='SAME', trainable=is_training)
+        rpn_class_score = tf.layers.conv2d(rpn, self._num_anchors * 2, [1, 1], trainable=is_training)  # H*W*9*2
         rpn_cls_score_reshape = _reshape_layer(rpn_class_score, 2, 'rpn_cls_score_reshape')
         rpn_cls_prob_reshape = _softmax_layer(rpn_cls_score_reshape, "rpn_cls_prob_reshape")
         rpn_cls_pred = tf.argmax(tf.reshape(rpn_cls_score_reshape, [-1, 2]), axis=1, name="rpn_cls_pred")
         rpn_cls_prob = _reshape_layer(rpn_cls_prob_reshape, self._num_anchors * 2, "rpn_cls_prob")
         rpn_bbox_pred = tf.layers.conv2d(rpn, self._num_anchors * 4, [1, 1], trainable=is_training)
-
-        self._predictions["rpn_cls_score_reshape"] = rpn_cls_score_reshape
 
         if is_training:
             scores = rpn_cls_prob[:, :, :, self._num_anchors:]
