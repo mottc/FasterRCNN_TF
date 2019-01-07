@@ -104,19 +104,19 @@ class Network(object):
 
     def region_proposal(self, feature_map, is_training):
         def _reshape_layer(bottom, num_dim, name):
-            input_shape = tf.shape(bottom)
+            input_shape = tf.shape(bottom)  # 1*H*W*18
             with tf.variable_scope(name) as scope:
-                to_caffe = tf.transpose(bottom, [0, 3, 1, 2])
-                reshaped = tf.reshape(to_caffe, tf.concat(axis=0, values=[[1, num_dim, -1], [input_shape[2]]]))
-                to_tf = tf.transpose(reshaped, [0, 2, 3, 1])
+                to_caffe = tf.transpose(bottom, [0, 3, 1, 2])  # 1*18*H*W
+                reshaped = tf.reshape(to_caffe, tf.concat(axis=0, values=[[1, num_dim, -1], [input_shape[2]]]))  # 1*2*9H*W
+                to_tf = tf.transpose(reshaped, [0, 2, 3, 1])  # 1*9H*W*2
                 return to_tf
 
-        def _softmax_layer(self, bottom, name):
+        def _softmax_layer(bottom, name):
             if name.startswith('rpn_cls_prob_reshape'):
-                input_shape = tf.shape(bottom)
-                bottom_reshaped = tf.reshape(bottom, [-1, input_shape[-1]])
+                input_shape = tf.shape(bottom)  # 1*9H*W*2
+                bottom_reshaped = tf.reshape(bottom, [-1, input_shape[-1]])  # 9HW*2
                 reshaped_score = tf.nn.softmax(bottom_reshaped, name=name)
-                return tf.reshape(reshaped_score, input_shape)
+                return tf.reshape(reshaped_score, input_shape)  # 1*9H*W*2
             return tf.nn.softmax(bottom, name=name)
 
         def bbox_transform_inv(boxes, deltas):
@@ -162,6 +162,25 @@ class Network(object):
             b3 = tf.maximum(tf.minimum(boxes[:, 3], im_info[0] - 1), 0)
             return tf.stack([b0, b1, b2, b3], axis=1)
 
+        def get_rois(rpn_cls_prob, rpn_bbox_pred, output_size):
+            scores = rpn_cls_prob[:, :, :, self._num_anchors:]
+            scores = tf.reshape(scores, shape=(-1,))
+            rpn_bbox_pred = tf.reshape(rpn_bbox_pred, shape=(-1, 4))
+
+            proposals = bbox_transform_inv(self.anchors, rpn_bbox_pred)
+            proposals = clip_boxes(proposals, self.image_info[:2])
+            indices = tf.image.non_max_suppression(proposals, scores, max_output_size=output_size, iou_threshold=0.7)
+            boxes = tf.gather(proposals, indices)
+            boxes = tf.to_float(boxes)
+            scores = tf.gather(scores, indices)
+            scores = tf.reshape(scores, shape=(-1, 1))
+            # 在每个indices前加入batch内索引，由于目前仅支持每个batch一张图像作为输入所以均为0
+            batch_inds = tf.zeros((tf.shape(indices)[0], 1), dtype=tf.float32)
+            rois = tf.concat([batch_inds, boxes], 1)
+            rois.set_shape([None, 5])
+            scores.set_shape([None, 1])
+            return rois, scores
+
         rpn = tf.layers.conv2d(inputs=feature_map, filters=512, kernel_size=[3, 3], padding='SAME', trainable=is_training)
         rpn_class_score = tf.layers.conv2d(rpn, self._num_anchors * 2, [1, 1], trainable=is_training)  # H*W*9*2
         rpn_cls_score_reshape = _reshape_layer(rpn_class_score, 2, 'rpn_cls_score_reshape')
@@ -170,47 +189,14 @@ class Network(object):
         rpn_cls_prob = _reshape_layer(rpn_cls_prob_reshape, self._num_anchors * 2, "rpn_cls_prob")
         rpn_bbox_pred = tf.layers.conv2d(rpn, self._num_anchors * 4, [1, 1], trainable=is_training)
 
+        # TODO:test300,train2000。提取
         if is_training:
-            scores = rpn_cls_prob[:, :, :, self._num_anchors:]
-            scores = tf.reshape(scores, shape=(-1,))
-            rpn_bbox_pred = tf.reshape(rpn_bbox_pred, shape=(-1, 4))
-
-            proposals = bbox_transform_inv(self.anchors, rpn_bbox_pred)
-            proposals = clip_boxes(proposals, self.image_info[:2])
-            # TODO:test300,train2000。提取
-            indices = tf.image.non_max_suppression(proposals, scores, max_output_size=2000 - 300, iou_threshold=0.7)
-            boxes = tf.gather(proposals, indices)
-            boxes = tf.to_float(boxes)
-            scores = tf.gather(scores, indices)
-            scores = tf.reshape(scores, shape=(-1, 1))
-            # 在每个indices前加入batch内索引，由于目前仅支持每个batch一张图像作为输入所以均为0
-            batch_inds = tf.zeros((tf.shape(indices)[0], 1), dtype=tf.float32)
-            rois = tf.concat([batch_inds, boxes], 1)
-            rois.set_shape([None, 5])
-            scores.set_shape([None, 1])
-
+            rois, scores = get_rois(rpn_cls_prob, rpn_bbox_pred, 2000)
             rpn_labels = self._anchor_target_layer(rpn_class_score, "anchor")
             with tf.control_dependencies([rpn_labels]):
                 rois, _ = self._proposal_target_layer(rois, scores, "rpn_rois")
-
         else:
-            scores = rpn_cls_prob[:, :, :, self._num_anchors:]
-            scores = tf.reshape(scores, shape=(-1,))
-            rpn_bbox_pred = tf.reshape(rpn_bbox_pred, shape=(-1, 4))
-
-            proposals = bbox_transform_inv(self.anchors, rpn_bbox_pred)
-            proposals = clip_boxes(proposals, self.image_info[:2])
-            # TODO:test300,train2000。提取
-            indices = tf.image.non_max_suppression(proposals, scores, max_output_size=300, iou_threshold=0.7)
-            boxes = tf.gather(proposals, indices)
-            boxes = tf.to_float(boxes)
-            scores = tf.gather(scores, indices)
-            scores = tf.reshape(scores, shape=(-1, 1))
-            # 在每个indices前加入batch内索引，由于目前仅支持每个batch一张图像作为输入所以均为0
-            batch_inds = tf.zeros((tf.shape(indices)[0], 1), dtype=tf.float32)
-            rois = tf.concat([batch_inds, boxes], 1)
-            rois.set_shape([None, 5])
-            scores.set_shape([None, 1])
+            rois, _ = get_rois(rpn_cls_prob, rpn_bbox_pred, 300)
 
         self._predictions["rpn_cls_score"] = rpn_class_score
         self._predictions["rpn_cls_score_reshape"] = rpn_cls_score_reshape
