@@ -6,7 +6,6 @@ def _get_w_h_ctrs(anchor):
     """
     返回窗口的宽，高，中心点x，中心点y
     """
-
     w = anchor[2] - anchor[0] + 1
     h = anchor[3] - anchor[1] + 1
     x_ctr = anchor[0] + 0.5 * (w - 1)

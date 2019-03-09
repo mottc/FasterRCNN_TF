@@ -1,14 +1,15 @@
 import numpy as np
 import numpy.random as npr
-import net_config
+from model.bbox_overlaps import bbox_overlaps
+from configs import *
 
 
 # 负责在训练RPN的时候，从上万个anchor中选择一些(比如256)进行训练，以使得正负样本比例大概是1:1. 同时给出训练的位置参数目标
-def anchor_target_layer(rpn_cls_score, gt_boxes, im_info, _feat_stride, all_anchors, num_anchors):
+def anchor_target_layer(rpn_cls_score, gt_boxes, im_info, _feat_stride, all_anchors, num_anchor_types):
     """Same as the anchor target layer in original Fast/er RCNN """
-    A = num_anchors  # anchor类型数量，为9
-    total_anchors = all_anchors.shape[0]  # 所有anchor数量
-    K = total_anchors / num_anchors  # feature_map点数
+    A = num_anchor_types  # anchor类型数量，为9
+    num_of_total_anchors = all_anchors.shape[0]  # 所有anchor数量
+    K = num_of_total_anchors / num_anchor_types  # feature_map点数
 
     # rpn_cls_score.shape=[1,height,width,depth],depth为18,height与width分别为原图高/16,原图宽/16
     height, width = rpn_cls_score.shape[1:3]
@@ -17,16 +18,16 @@ def anchor_target_layer(rpn_cls_score, gt_boxes, im_info, _feat_stride, all_anch
     # 只保存图像区域内的anchor，超出图片区域的舍弃
     # im_info[0]存的是图片像素行数即高，im_info[1]存的是图片像素列数即宽
     # [0]表示,np.where取出的是tuple，里面是一个array，array里是符合的引索，所以[0]就是要取出array索引
-    inds_inside = np.where(
+    index_inside = np.where(
         (all_anchors[:, 0] >= -0) & (all_anchors[:, 1] >= -0) &
         (all_anchors[:, 2] < im_info[1]) & (all_anchors[:, 3] < im_info[0]))[0]
 
     # keep only inside anchors
-    anchors = all_anchors[inds_inside, :]
+    anchors = all_anchors[index_inside, :]
 
     # label: 1 is positive, 0 is negative, -1 is dont care
     # 生成一个具有符合条件的anchor数个数的未初始化随机数的ndarray
-    labels = np.empty((len(inds_inside),), dtype=np.float32)
+    labels = np.empty((len(index_inside),), dtype=np.float32)
     # 将这些随机数初始化为-1
     labels.fill(-1)
 
@@ -37,14 +38,14 @@ def anchor_target_layer(rpn_cls_score, gt_boxes, im_info, _feat_stride, all_anch
     overlaps = bbox_overlaps(np.ascontiguousarray(anchors, dtype=np.float),  # TODO:!!!
                              np.ascontiguousarray(gt_boxes, dtype=np.float))
     # 每个anchor对应的最大
-    argmax_overlaps = overlaps.argmax(axis=1)
-    max_overlaps = overlaps[np.arange(len(inds_inside)), argmax_overlaps]
+    argmax_overlaps = overlaps.argmax(axis=1)  # 位置
+    max_overlaps = overlaps[np.arange(len(index_inside)), argmax_overlaps]  # iou值
 
     # 每个GT对应的最大
     gt_argmax_overlaps = overlaps.argmax(axis=0)
     gt_max_overlaps = overlaps[gt_argmax_overlaps, np.arange(overlaps.shape[1])]
 
-    gt_argmax_overlaps = np.where(overlaps == gt_max_overlaps)[0]  # TODO:看不懂
+    gt_argmax_overlaps = np.where(overlaps == gt_max_overlaps)[0]  # TODO:看不懂->每个GT对应的最大anchors的位置（第几个）
 
     # assign bg labels first so that positive labels can clobber them
     # first set the negatives
@@ -76,32 +77,30 @@ def anchor_target_layer(rpn_cls_score, gt_boxes, im_info, _feat_stride, all_anch
         disable_inds = npr.choice(bg_inds, size=(len(bg_inds) - num_bg), replace=False)
         labels[disable_inds] = -1
 
-    bbox_targets = _compute_targets(anchors, gt_boxes[argmax_overlaps, :])  # anchor和与每个anchorIOU最大的GT
+    bbox_targets = _compute_targets(anchors, gt_boxes[argmax_overlaps, :])  # 前一个参数：anchors，后一个参数：与每个anchorIOU最大的GT
+    # bbox_targets为每个anchor变为最相近GT的回归参数
 
-    bbox_inside_weights = np.zeros((len(inds_inside), 4), dtype=np.float32)
     # only the positive ones have regression targets
+    # bbox_inside_weights 它实际上就是控制回归的对象的，只有真正是前景的对象才会被回归
     # 对应labels==1的引索,全零的四个元素变为(1.0, 1.0, 1.0, 1.0)
+    bbox_inside_weights = np.zeros((len(index_inside), 4), dtype=np.float32)
     bbox_inside_weights[labels == 1, :] = np.array((1.0, 1.0, 1.0, 1.0))  # TODO:
 
-    bbox_outside_weights = np.zeros((len(inds_inside), 4), dtype=np.float32)
-
-    # uniform weighting of examples (given non-uniform sampling)
-
+    # bbox_outside_weights 就是为了平衡 box_loss,cls_loss 的，因为二个loss差距过大，所以它被设置为 1/N 的权重
+    bbox_outside_weights = np.zeros((len(index_inside), 4), dtype=np.float32)
     num_examples = np.sum(labels >= 0)
     positive_weights = np.ones((1, 4)) * 1.0 / num_examples
     negative_weights = np.ones((1, 4)) * 1.0 / num_examples
-
-    # 对应位置放入初始化权重
-    bbox_outside_weights[labels == 1, :] = positive_weights
+    bbox_outside_weights[labels == 1, :] = positive_weights  # 1/256
     bbox_outside_weights[labels == 0, :] = negative_weights
 
     # map up to original set of anchors
     # 之后可能还会用到第一次被筛选出的anchor信息，所以对labels信息进行扩充，添加进去了第一次筛选出的anchor的标签（都为-1）
-    labels = _unmap(labels, total_anchors, inds_inside, fill=-1)
+    labels = _unmap(labels, num_of_total_anchors, index_inside, fill=-1)
     # 以下三个相同，都是把原始anchor信息添加进去，但是信息都是0
-    bbox_targets = _unmap(bbox_targets, total_anchors, inds_inside, fill=0)
-    bbox_inside_weights = _unmap(bbox_inside_weights, total_anchors, inds_inside, fill=0)
-    bbox_outside_weights = _unmap(bbox_outside_weights, total_anchors, inds_inside, fill=0)
+    bbox_targets = _unmap(bbox_targets, num_of_total_anchors, index_inside, fill=0)
+    bbox_inside_weights = _unmap(bbox_inside_weights, num_of_total_anchors, index_inside, fill=0)
+    bbox_outside_weights = _unmap(bbox_outside_weights, num_of_total_anchors, index_inside, fill=0)
 
     # labels
     labels = labels.reshape((1, height, width, A)).transpose(0, 3, 1, 2)
@@ -110,25 +109,24 @@ def anchor_target_layer(rpn_cls_score, gt_boxes, im_info, _feat_stride, all_anch
 
     # bbox_targets
     bbox_targets = bbox_targets.reshape((1, height, width, A * 4))
-
     rpn_bbox_targets = bbox_targets
+
     # bbox_inside_weights
     bbox_inside_weights = bbox_inside_weights.reshape((1, height, width, A * 4))
-
     rpn_bbox_inside_weights = bbox_inside_weights
 
     # bbox_outside_weights
     bbox_outside_weights = bbox_outside_weights.reshape((1, height, width, A * 4))
-
     rpn_bbox_outside_weights = bbox_outside_weights
+
     return rpn_labels, rpn_bbox_targets, rpn_bbox_inside_weights, rpn_bbox_outside_weights
 
 
 def _unmap(data, count, inds, fill=0):
-    """ Unmap a subset of item (data) back to the original set of items (of size count) """
+    """ Unmap a subset of item (experiments) back to the original set of items (of size count) """
     ## 判断label是否为一维的
     if len(data.shape) == 1:
-        ## 建立一个（A*K，）大小的一维数组
+        ## 建立一个（anchor总数量，）大小的一维数组
         ret = np.empty((count,), dtype=np.float32)
         ret.fill(fill)
         ## 图片内的anchor属于第一次筛选，筛选出去的label都为-1
@@ -137,7 +135,7 @@ def _unmap(data, count, inds, fill=0):
         ## 所以inds_inside与labels一一对应，但是其中还存在有大量不训练的标签为-1的anchor
         ret[inds] = data
     else:
-        ## 产生一个（A*K，4）ndarray
+        ## 产生一个（anchor总数量，4）ndarray
         ret = np.empty((count,) + data.shape[1:], dtype=np.float32)
         ret.fill(fill)
         ## 对于标签为0与1的填入信息
@@ -176,12 +174,12 @@ def _compute_targets(ex_rois, gt_rois):
     # 要有anchor左上角与右下角坐标，有4个元素
     assert ex_rois.shape[1] == 4
     # GT有标签位，所以为5个
-    assert gt_rois.shape[1] == 5
+    assert gt_rois.shape[1] == 5  # TODO:原始是5
     # 返回一个用于anchor回归成target的包含每个anchor回归值(dx、dy、dw、dh)的array
     return bbox_transform(ex_rois, gt_rois[:, :4]).astype(np.float32, copy=False)
 
 
-## 负责在训练RoIHead/Fast R-CNN的时候，从RoIs选择一部分(比如128个)用以训练
+# 负责在训练RoIHead/Fast R-CNN的时候，从RoIs选择一部分(比如128个)用以训练
 def proposal_target_layer(rpn_rois, rpn_scores, gt_boxes, _num_classes):
     """
     Assign object detection proposals to ground-truth targets. Produces proposal
@@ -193,17 +191,8 @@ def proposal_target_layer(rpn_rois, rpn_scores, gt_boxes, _num_classes):
     all_rois = rpn_rois
     all_scores = rpn_scores
 
-    # Include ground-truth boxes in the set of candidate rois
-    # 把GT也当作一部分的roi
-    if cfg.TRAIN.USE_GT:
-        zeros = np.zeros((gt_boxes.shape[0], 1), dtype=gt_boxes.dtype)
-        all_rois = np.vstack((all_rois, np.hstack((zeros, gt_boxes[:, :-1]))))
-        # not sure if it a wise appending, but anyway i am not using it
-        all_scores = np.vstack((all_scores, zeros))
-
-    num_images = 1
-    rois_per_image = cfg.TRAIN.BATCH_SIZE / num_images
-    fg_rois_per_image = np.round(cfg.TRAIN.FG_FRACTION * rois_per_image)
+    rois_per_image = BATCH_SIZE
+    fg_rois_per_image = np.round(FG_FRACTION * rois_per_image)
 
     # Sample rois with classification labels and bounding box regression
     # targets
@@ -221,6 +210,8 @@ def proposal_target_layer(rpn_rois, rpn_scores, gt_boxes, _num_classes):
     return rois, roi_scores, labels, bbox_targets, bbox_inside_weights, bbox_outside_weights
 
 
+#
+#
 def _get_bbox_regression_labels(bbox_target_data, num_classes):
     """Bounding-box regression targets (bbox_target_data) are stored in a
     compact form N x (class, tx, ty, tw, th)
@@ -242,11 +233,11 @@ def _get_bbox_regression_labels(bbox_target_data, num_classes):
         start = int(4 * cls)
         end = start + 4
         bbox_targets[ind, start:end] = bbox_target_data[ind, 1:]
-        bbox_inside_weights[ind, start:end] = cfg.TRAIN.BBOX_INSIDE_WEIGHTS
+        bbox_inside_weights[ind, start:end] = (1.0, 1.0, 1.0, 1.0)
     return bbox_targets, bbox_inside_weights
-
-
-def _compute_targets1(ex_rois, gt_rois, labels):
+#
+#
+def _compute_targets_with_labels(ex_rois, gt_rois, labels):
     """Compute bounding-box regression targets for an image."""
 
     assert ex_rois.shape[0] == gt_rois.shape[0]
@@ -254,12 +245,10 @@ def _compute_targets1(ex_rois, gt_rois, labels):
     assert gt_rois.shape[1] == 4
 
     targets = bbox_transform(ex_rois, gt_rois)
-    if cfg.TRAIN.BBOX_NORMALIZE_TARGETS_PRECOMPUTED:
-        # Optionally normalize targets by a precomputed mean and stdev
-        targets = ((targets - np.array(cfg.TRAIN.BBOX_NORMALIZE_MEANS)) / np.array(cfg.TRAIN.BBOX_NORMALIZE_STDS))
+
     return np.hstack((labels[:, np.newaxis], targets)).astype(np.float32, copy=False)
-
-
+#
+#
 def _sample_rois(all_rois, all_scores, gt_boxes, fg_rois_per_image, rois_per_image, num_classes):
     """Generate a random sample of RoIs comprising foreground and background
     examples.
@@ -273,11 +262,10 @@ def _sample_rois(all_rois, all_scores, gt_boxes, fg_rois_per_image, rois_per_ima
     labels = gt_boxes[gt_assignment, 4]
 
     # Select foreground RoIs as those with >= FG_THRESH overlap
-    fg_inds = np.where(max_overlaps >= cfg.TRAIN.FG_THRESH)[0]
+    fg_inds = np.where(max_overlaps >= FG_THRESH)[0]
     # Guard against the case when an image has fewer than fg_rois_per_image
     # Select background RoIs as those within [BG_THRESH_LO, BG_THRESH_HI)
-    bg_inds = np.where((max_overlaps < cfg.TRAIN.BG_THRESH_HI) &
-                       (max_overlaps >= cfg.TRAIN.BG_THRESH_LO))[0]
+    bg_inds = np.where(max_overlaps < FG_THRESH)[0] #TODO：参看原代码
 
     # Small modification to the original version where we ensure a fixed number of regions are sampled
     # 总共选择128个区域，如果前景背景都有，那先选前景，数量多余要求的数时选择要求的个数，少于时则有几个选几个。剩下的都用背景补齐128
@@ -310,7 +298,7 @@ def _sample_rois(all_rois, all_scores, gt_boxes, fg_rois_per_image, rois_per_ima
     rois = all_rois[keep_inds]
     roi_scores = all_scores[keep_inds]
     # 每个类别对应的回归值
-    bbox_target_data = _compute_targets1(rois[:, 1:5], gt_boxes[gt_assignment[keep_inds], :4], labels)
+    bbox_target_data = _compute_targets_with_labels(rois[:, 1:5], gt_boxes[gt_assignment[keep_inds], :4], labels)
 
     bbox_targets, bbox_inside_weights = _get_bbox_regression_labels(bbox_target_data, num_classes)
 

@@ -1,0 +1,27 @@
+<annotation>
+  <folder>VOC2007</folder>
+  <filename>AllowUTurn_contest2015_013.jpg</filename>
+  <source>
+    <database>The VOC2007 Database</database>
+    <annotation>PASCAL VOC2007</annotation>
+    <image>flickr</image>
+  </source>
+  <size>
+    <width>960</width>
+    <height>640</height>
+    <depth>3</depth>
+  </size>
+  <segmented>0</segmented>
+  <object>
+    <name>AllowUTurn</name>
+    <pose>Right</pose>
+    <truncated>0</truncated>
+    <difficult>0</difficult>
+    <bndbox>
+      <xmin>141</xmin>
+      <ymin>93</ymin>
+      <xmax>219</xmax>
+      <ymax>158</ymax>
+    </bndbox>
+  </object>
+</annotation>
