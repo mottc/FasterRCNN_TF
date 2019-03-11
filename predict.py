@@ -27,6 +27,7 @@ def bbox_transform_inv(boxes, deltas):
 
     pred_ctr_x = dx * widths[:, np.newaxis] + ctr_x[:, np.newaxis]
     pred_ctr_y = dy * heights[:, np.newaxis] + ctr_y[:, np.newaxis]
+
     pred_w = np.exp(dw) * widths[:, np.newaxis]
     pred_h = np.exp(dh) * heights[:, np.newaxis]
     ## 预测后的（x1,y1,x2,y2）存入 pred_boxes
@@ -55,17 +56,27 @@ def clip_boxes(boxes, im_shape):
     return boxes
 
 
-def visualization(result_list):
-    im = cv2.imread('./experiments/experiment1/data/images/AllowUTurn_contest2015_013.jpg')
+def visualization(result_list, path=IMAGE_RESULT_PATH):
+    file_name = result_list[0][0]
+    im = cv2.imread(os.path.join(PREDICT_IMG_DATA_PATH, file_name))
 
-    for ab in bo:
-        cv2.rectangle(im, (int(ab[1]), int(ab[2])), (int(ab[3]), int(ab[4])), (0, 0, 255), 2)
-    cv2.imwrite('./20.jpg', im)
+    for result in result_list:
+        class_name = result[1]
+        score = result[2]
+        x1 = result[3]
+        y1 = result[4]
+        x2 = result[5]
+        y2 = result[6]
+        cv2.rectangle(im, (int(x1), int(y1)), (int(x2), int(y2)), (0, 255, 0), 2)
+        # 各参数依次是：图片，添加的文字，左上角坐标，字体，字体大小，颜色，字体粗细
+        cv2.putText(im, str(class_name) + ': ' + str(score), (int(x1), int(y1)), cv2.FONT_HERSHEY_COMPLEX_SMALL, 0.8,
+                    (0, 0, 255), 2)
+    cv2.imwrite(os.path.join(path, file_name), im)
 
 
-def write_txt_result(result_list):
+def write_txt_result(result_list, path=TXT_RESULT_PATH):
     file_name = result_list[0][0].split('.')[0]
-    txt_file = open(os.path.join(TXT_RESULT_PATH, file_name + '.txt'), 'w')
+    txt_file = open(os.path.join(path, file_name + '.txt'), 'w')
     for result in result_list:
         for element in result:
             txt_file.write(str(element) + ' ')
@@ -73,16 +84,46 @@ def write_txt_result(result_list):
     txt_file.close()
 
 
-def nms(detections, NMS_THRESH):
-    # TODO：
-    pass
+def nms(detections, thresh):
+    """Pure Python NMS baseline."""
+    x1 = detections[:, 0]
+    y1 = detections[:, 1]
+    x2 = detections[:, 2]
+    y2 = detections[:, 3]
+    scores = detections[:, 4]
+    ## 单个框面积大小
+    areas = (x2 - x1 + 1) * (y2 - y1 + 1)
+    ## 按照得分值从大到小将序号排列
+    order = scores.argsort()[::-1]  ## [::-1]倒序
+
+    keep = []
+    while order.size > 0:
+        i = order[0]
+        keep.append(i)  ## 得分最大的保留，保留值为序号
+
+        xx1 = np.maximum(x1[i], x1[order[1:]])
+        yy1 = np.maximum(y1[i], y1[order[1:]])
+        xx2 = np.minimum(x2[i], x2[order[1:]])
+        yy2 = np.minimum(y2[i], y2[order[1:]])
+
+        w = np.maximum(0.0, xx2 - xx1 + 1)
+        h = np.maximum(0.0, yy2 - yy1 + 1)
+        inter = w * h
+        ovr = inter / (areas[i] + areas[order[1:]] - inter)
+
+        inds = np.where(ovr <= thresh)[0]
+        order = order[inds + 1]
+
+    return keep
 
 
 def predict():
     fasterRCNN = Network()
     fasterRCNN.build(is_training=False)
-    # TODO:加载已训练的网络参数
+    saver = tf.train.Saver()
     with tf.Session() as sess:
+        saver.restore(sess, os.path.join(CHECKPOINTS_PATH, "model_final.ckpt"))
+        print("Model restored.")
         base_extractor = VGG16(include_top=False)
         extractor = Model(inputs=base_extractor.input, outputs=base_extractor.get_layer('block5_conv3').output)
         predict_img_names = os.listdir(PREDICT_IMG_DATA_PATH)
@@ -91,7 +132,7 @@ def predict():
             img_data, img_info = get_predict_data(predict_img_name)
             features = extractor.predict(img_data, steps=1)
             rois, scores, regression_parameter = sess.run(
-                [fasterRCNN._predictions["rois"], fasterRCNN._predictions["cls_score"],
+                [fasterRCNN._predictions["rois"], fasterRCNN._predictions["cls_prob"],
                  fasterRCNN._predictions["bbox_pred"]],
                 feed_dict={fasterRCNN.feature_map: features,
                            fasterRCNN.image_info: img_info})
@@ -105,7 +146,7 @@ def predict():
             result_list = []
             for class_index, class_name in enumerate(CLASSES[1:]):
                 class_index += 1  # 因为跳过了背景类别
-                cls_boxes = boxes[:, 4 * class_index:4 * (class_index + 1)]
+                cls_boxes = pred_boxes[:, 4 * class_index:4 * (class_index + 1)]  # TODO:
                 cls_scores = scores[:, class_index]
                 detections = np.hstack((cls_boxes, cls_scores[:, np.newaxis])).astype(np.float32)
                 keep = nms(detections, NMS_THRESH)
@@ -122,6 +163,7 @@ def predict():
                     for coordinate in bbox:
                         result_for_a_class.append(coordinate)
                     result_list.append(result_for_a_class)
+                    # result_for_a_class = [fileName,class_name,score,x1,y1,x2,y2]
             if len(result_list) == 0:
                 continue
 
