@@ -2,7 +2,8 @@ import os
 import xml.etree.ElementTree as ET
 import cv2
 import numpy as np
-
+from tensorflow.keras.applications.vgg16 import preprocess_input
+from tensorflow.keras.preprocessing import image
 from configs import *
 
 
@@ -22,7 +23,6 @@ def load_pascal_annotation(xml_path):
         objs = non_diff_objs
     num_objs = len(objs)
     boxes = np.zeros((num_objs, 5), dtype=np.float32)
-    gt_classes = np.zeros((num_objs, len(classes)), dtype=np.float32)  # TODO:要不要？
 
     for ix, obj in enumerate(objs):
         bbox = obj.find('bndbox')
@@ -31,19 +31,34 @@ def load_pascal_annotation(xml_path):
         x2 = float(bbox.find('xmax').text)
         y2 = float(bbox.find('ymax').text)
         cls = classes.index(obj.find('name').text.strip())
-        boxes[ix, :] = [x1, y1, x2, y2, cls]
-        gt_classes[ix, cls] = 1.0
+        boxes[ix, :] = [x1 * scale, y1 * scale, x2 * scale, y2 * scale, cls]  # FIX:尺寸变化
 
-    return boxes, gt_classes, [scale * original_height, scale * original_width, scale]
+    return boxes, [scale * original_height, scale * original_width, scale]
 
 
-def get_data(img_name):
+def get_train_data(img_name):
     # xml
     xml_name = img_name.split('.')[0].strip() + '.xml'
-    boxes, gt_classes, img_info = load_pascal_annotation(os.path.join(LABEL_PATH, xml_name))
+    boxes, img_info = load_pascal_annotation(os.path.join(LABEL_PATH, xml_name))
 
-    # image
-    img = cv2.imread(os.path.join(TRAIN_IMG_DATA_PATH, img_name))
-    resize_img = cv2.resize(img, (0, 0), fx=img_info[2], fy=img_info[2])
-    img_data = resize_img[np.newaxis, :]
-    return img_data, boxes, gt_classes, img_info
+    img = image.load_img(os.path.join(TRAIN_IMG_DATA_PATH, img_name), target_size=(int(img_info[0]), int(img_info[1])))
+    print(int(img_info[0]), int(img_info[1]))
+    x = image.img_to_array(img)
+    x = np.expand_dims(x, axis=0)
+    img_data = preprocess_input(x)
+    return img_data, boxes, img_info
+
+
+def get_predict_data(img_name):
+    CVimg = cv2.imread(os.path.join(PREDICT_IMG_DATA_PATH, img_name))
+    scale = RESIZED_IMAGE_SIZE[0] / CVimg.shape[0]
+    if CVimg.shape[0] / CVimg.shape[1] < RESIZED_IMAGE_SIZE[0] / RESIZED_IMAGE_SIZE[1]:
+        scale = RESIZED_IMAGE_SIZE[1] / CVimg.shape[1]
+
+    img = image.load_img(os.path.join(TRAIN_IMG_DATA_PATH, img_name),
+                         target_size=(int(scale * CVimg.shape[0]), int(scale * CVimg.shape[1])))
+    print(int(scale * CVimg.shape[0]), int(scale * CVimg.shape[1]))
+    x = image.img_to_array(img)
+    x = np.expand_dims(x, axis=0)
+    img_data = preprocess_input(x)
+    return img_data, [scale * CVimg.shape[0], scale * CVimg.shape[1], scale]
