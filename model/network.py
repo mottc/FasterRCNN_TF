@@ -2,7 +2,6 @@ import tensorflow as tf
 
 from configs import *
 from model.anchors_utils import generate_anchors
-from model.bbox_transform import bbox_transform_inv
 from model.target_layer import anchor_target_layer, proposal_target_layer
 
 
@@ -29,7 +28,41 @@ class Network(object):
 
     def get_rois(self, rpn_cls_prob, rpn_bbox_pred, output_size):
 
-        def clip_boxes(boxes, im_info):
+        def bbox_transform_inv_tf(boxes, deltas):
+            # boxes:生成的anchor
+            # deltas:包围框偏移量 [1*height*width*anchor_num,4]
+            boxes = tf.cast(boxes, deltas.dtype)
+            widths = tf.subtract(boxes[:, 2], boxes[:, 0]) + 1.0
+            heights = tf.subtract(boxes[:, 3], boxes[:, 1]) + 1.0
+            ctr_x = tf.add(boxes[:, 0], widths * 0.5)
+            ctr_y = tf.add(boxes[:, 1], heights * 0.5)
+
+            # 获取包围框预测结果[dx,dy,dw,dh](精修？)
+            dx = deltas[:, 0]
+            dy = deltas[:, 1]
+            dw = deltas[:, 2]
+            dh = deltas[:, 3]
+
+            # tf.multiply对应元素相乘
+            # pre_x = dx * w + ctr_x
+            # pre_y = dy * h + ctr_y
+            # pre_w = e**dw * w
+            # pre_h = e**dh * h
+            pred_ctr_x = tf.add(tf.multiply(dx, widths), ctr_x)
+            pred_ctr_y = tf.add(tf.multiply(dy, heights), ctr_y)
+            pred_w = tf.multiply(tf.exp(dw), widths)
+            pred_h = tf.multiply(tf.exp(dh), heights)
+
+            # 将坐标转换为（xmin,ymin,xmax,ymax）格式
+            pred_boxes0 = tf.subtract(pred_ctr_x, pred_w * 0.5)
+            pred_boxes1 = tf.subtract(pred_ctr_y, pred_h * 0.5)
+            pred_boxes2 = tf.add(pred_ctr_x, pred_w * 0.5)
+            pred_boxes3 = tf.add(pred_ctr_y, pred_h * 0.5)
+
+            # 叠加结果输出
+            return tf.stack([pred_boxes0, pred_boxes1, pred_boxes2, pred_boxes3], axis=1)
+
+        def clip_boxes_tf(boxes, im_info):
             # 按照图像大小裁剪boxes
             b0 = tf.maximum(tf.minimum(boxes[:, 0], im_info[1] - 1), 0)
             b1 = tf.maximum(tf.minimum(boxes[:, 1], im_info[0] - 1), 0)
@@ -41,8 +74,8 @@ class Network(object):
         scores = tf.reshape(scores, shape=(-1,))
         rpn_bbox_pred = tf.reshape(rpn_bbox_pred, shape=(-1, 4))
 
-        proposals = bbox_transform_inv(self.anchors, rpn_bbox_pred)
-        proposals = clip_boxes(proposals, self.image_info[:2])
+        proposals = bbox_transform_inv_tf(self.anchors, rpn_bbox_pred)
+        proposals = clip_boxes_tf(proposals, self.image_info[:2])
         indices = tf.image.non_max_suppression(proposals, scores, max_output_size=output_size, iou_threshold=0.7)
         boxes = tf.gather(proposals, indices)
         boxes = tf.to_float(boxes)
@@ -146,8 +179,7 @@ class Network(object):
     #
     def roi_pooling(self):
         batch_ids = tf.squeeze(tf.slice(self._rois, [0, 0], [-1, 1], name="batch_id"), [1])
-        # Get the normalized coordinates of bounding boxes
-        # 获取包围框归一化后的坐标系（待细化）
+        # 获取包围框归一化后的坐标系（坐标与原图比例）
         bottom_shape = tf.shape(self.feature_map)
         height = (tf.to_float(bottom_shape[1]) - 1.) * tf.to_float(16)  # TODO:
         width = (tf.to_float(bottom_shape[2]) - 1.) * tf.to_float(16)
@@ -157,9 +189,7 @@ class Network(object):
         y2 = tf.slice(self._rois, [0, 4], [-1, 1], name="y2") / height
 
         bboxes = tf.stop_gradient(tf.concat([y1, x1, y2, x2], axis=1))
-        # POOLING_SIZE 池化后区域大小
-        pre_pool_size = 7 * 2  # TODO:
-        # 剪裁并通过插值方法调整尺寸
+        pre_pool_size = 7 * 2
         crops = tf.image.crop_and_resize(self.feature_map, bboxes, tf.to_int32(batch_ids),
                                          [pre_pool_size, pre_pool_size],
                                          name="crops")
@@ -174,7 +204,7 @@ class Network(object):
             fc6 = tf.layers.dropout(fc6, rate=0.5, training=True)
         self._fc7 = tf.layers.dense(fc6, 4096)
         if is_training:
-            self._fc7 = tf.layers.dropout(fc6, rate=0.5, training=True)
+            self._fc7 = tf.layers.dropout(self._fc7, rate=0.5, training=True)
 
     #
     def region_classification(self, is_training):
@@ -189,8 +219,6 @@ class Network(object):
         self._predictions["cls_prob"] = cls_prob
         self._predictions["bbox_pred"] = bbox_pred
 
-        return cls_prob, bbox_pred
-
     #
     def _smooth_l1_loss(self, bbox_pred, bbox_targets, bbox_inside_weights, bbox_outside_weights, sigma=1.0, dim=[1]):
         sigma_2 = sigma ** 2
@@ -198,13 +226,12 @@ class Network(object):
         in_box_diff = bbox_inside_weights * box_diff
         abs_in_box_diff = tf.abs(in_box_diff)
         smoothL1_sign = tf.stop_gradient(tf.to_float(tf.less(abs_in_box_diff, 1. / sigma_2)))
-        in_loss_box = tf.pow(in_box_diff, 2) * (sigma_2 / 2.) * smoothL1_sign + (abs_in_box_diff - (0.5 / sigma_2)) * (
-                1. - smoothL1_sign)
+        in_loss_box = tf.pow(in_box_diff, 2) * (sigma_2 / 2.) * smoothL1_sign \
+                      + (abs_in_box_diff - (0.5 / sigma_2)) * (1. - smoothL1_sign)
         out_loss_box = bbox_outside_weights * in_loss_box
         loss_box = tf.reduce_mean(tf.reduce_sum(out_loss_box, axis=dim))
         return loss_box
 
-    #
     def add_losses(self):
         # RPN类别损失
         rpn_cls_score = tf.reshape(self._predictions['rpn_cls_score_reshape'], [-1, 2])
@@ -248,12 +275,12 @@ class Network(object):
 
         # TODO:正则化
 
-        regularization_loss = tf.losses.get_regularization_loss()
+        # regularization_loss = tf.losses.get_regularization_loss()
+        #
+        # # regularization_loss = tf.add_n(tf.losses.get_regularization_losses())
+        # self._losses['total_loss'] = loss + regularization_loss
 
-        # regularization_loss = tf.add_n(tf.losses.get_regularization_losses())
-        self._losses['total_loss'] = loss + regularization_loss
-
-        # self._losses['total_loss'] = loss
+        self._losses['total_loss'] = loss
 
     def build(self, is_training):
         self.get_anchors()
