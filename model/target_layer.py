@@ -1,7 +1,24 @@
 import numpy as np
 import numpy.random as npr
-from model.bbox_overlaps import bbox_overlaps
 from configs import *
+
+
+def bbox_overlaps(anchors, gt_boxes):
+    N = anchors.shape[0]
+    K = gt_boxes.shape[0]
+
+    overlaps = np.zeros((N, K), dtype=np.float32)
+    for k in range(K):
+        box_area = ((gt_boxes[k, 2] - gt_boxes[k, 0] + 1) * (gt_boxes[k, 3] - gt_boxes[k, 1] + 1))
+        for n in range(N):
+            iw = (min(anchors[n, 2], gt_boxes[k, 2]) - max(anchors[n, 0], gt_boxes[k, 0]) + 1)
+            if iw > 0:
+                ih = (min(anchors[n, 3], gt_boxes[k, 3]) - max(anchors[n, 1], gt_boxes[k, 1]) + 1)
+                if ih > 0:
+                    ua = float(
+                        (anchors[n, 2] - anchors[n, 0] + 1) * (anchors[n, 3] - anchors[n, 1] + 1) + box_area - iw * ih)
+                    overlaps[n, k] = iw * ih / ua
+    return overlaps
 
 
 # 负责在训练RPN的时候，从上万个anchor中选择一些(比如256)进行训练，以使得正负样本比例大概是1:1. 同时给出训练的位置参数目标
@@ -235,6 +252,8 @@ def _get_bbox_regression_labels(bbox_target_data, num_classes):
         bbox_targets[ind, start:end] = bbox_target_data[ind, 1:]
         bbox_inside_weights[ind, start:end] = (1.0, 1.0, 1.0, 1.0)
     return bbox_targets, bbox_inside_weights
+
+
 #
 #
 def _compute_targets_with_labels(ex_rois, gt_rois, labels):
@@ -247,6 +266,8 @@ def _compute_targets_with_labels(ex_rois, gt_rois, labels):
     targets = bbox_transform(ex_rois, gt_rois)
 
     return np.hstack((labels[:, np.newaxis], targets)).astype(np.float32, copy=False)
+
+
 #
 #
 def _sample_rois(all_rois, all_scores, gt_boxes, fg_rois_per_image, rois_per_image, num_classes):
@@ -265,7 +286,7 @@ def _sample_rois(all_rois, all_scores, gt_boxes, fg_rois_per_image, rois_per_ima
     fg_inds = np.where(max_overlaps >= FG_THRESH)[0]
     # Guard against the case when an image has fewer than fg_rois_per_image
     # Select background RoIs as those within [BG_THRESH_LO, BG_THRESH_HI)
-    bg_inds = np.where(max_overlaps < FG_THRESH)[0] #TODO：参看原代码
+    bg_inds = np.where(max_overlaps < FG_THRESH)[0]  # TODO：参看原代码
 
     # Small modification to the original version where we ensure a fixed number of regions are sampled
     # 总共选择128个区域，如果前景背景都有，那先选前景，数量多余要求的数时选择要求的个数，少于时则有几个选几个。剩下的都用背景补齐128
@@ -298,8 +319,9 @@ def _sample_rois(all_rois, all_scores, gt_boxes, fg_rois_per_image, rois_per_ima
     rois = all_rois[keep_inds]
     roi_scores = all_scores[keep_inds]
     # 每个类别对应的回归值
-    bbox_target_data = _compute_targets_with_labels(rois[:, 1:5], gt_boxes[gt_assignment[keep_inds], :4], labels)
+    bbox_target_data_with_label = _compute_targets_with_labels(rois[:, 1:5], gt_boxes[gt_assignment[keep_inds], :4],
+                                                               labels)
 
-    bbox_targets, bbox_inside_weights = _get_bbox_regression_labels(bbox_target_data, num_classes)
+    bbox_targets, bbox_inside_weights = _get_bbox_regression_labels(bbox_target_data_with_label, num_classes)
 
     return labels, rois, roi_scores, bbox_targets, bbox_inside_weights
